@@ -272,20 +272,22 @@ def label(kode):
 
 
 def catat_jurnal(baris, ket, no_rek="-"):
-    """baris = [(kode_akun, debit, kredit), ...]. Total debit harus sama dengan total kredit."""
+    """baris = [(kode_akun, debit, kredit[, no_rek]), ...]. Total debit harus sama dengan total kredit."""
     assert sum(b[1] for b in baris) == sum(b[2] for b in baris), "Jurnal tidak seimbang"
     st.session_state.no_jurnal += 1
     nomor = f"JU-{st.session_state.no_jurnal:04d}"
     waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    for kode, d, k in baris:
+    for b in baris:
+        kode, d, k = b[:3]
+        rek_baris = b[3] if len(b) > 3 else no_rek
         st.session_state.jurnal_umum.append(
-            {"No Jurnal": nomor, "Waktu": waktu, "No Rek": no_rek, "Keterangan": ket,
+            {"No Jurnal": nomor, "Waktu": waktu, "No Rek": rek_baris, "Keterangan": ket,
              "Kode Akun": label(kode), "Debit": d, "Kredit": k}
         )
 
 
 if "rekening_nasabah" not in st.session_state:
-    st.session_state.rekening_nasabah = {"123456": {"nama": "Budi Santoso", "saldo": 5_000_000}}
+    st.session_state.rekening_nasabah = {"123456": {"nama": "Budi Santoso", "saldo": 5_000_000, "hp": "081234567890", "alamat": "Tasikmalaya", "ktp": "-", "status": "Aktif"}}
 if "jurnal_umum" not in st.session_state:
     st.session_state.jurnal_umum = []
     st.session_state.no_jurnal = 0
@@ -313,7 +315,8 @@ def semua_saldo():
 
 def daftar_rekening():
     return pd.DataFrame(
-        [{"No Rek": k, "Nama": v["nama"], "Saldo": v["saldo"]} for k, v in st.session_state.rekening_nasabah.items()]
+        [{"No Rek": k, "Nama": v["nama"], "No HP": v.get("hp", "-"), "Status": v.get("status", "Aktif"), "Saldo": v["saldo"]}
+         for k, v in st.session_state.rekening_nasabah.items()]
     )
 
 
@@ -372,16 +375,22 @@ if halaman == "Dashboard":
 # =====================================================
 elif halaman == "Teller":
     banner("LOKET TELLER", "Transaksi Tunai", "Setor atau tarik tunai, jurnal debit-kredit terbentuk otomatis.")
-    no_rek = st.text_input("Nomor rekening nasabah", "123456")
+    opsi_rek = {
+        f"{no} · {data['nama']}": no
+        for no, data in st.session_state.rekening_nasabah.items()
+        if data.get("status", "Aktif") == "Aktif"
+    }
+    pilihan = st.selectbox("Rekening nasabah", list(opsi_rek.keys()))
+    no_rek = opsi_rek[pilihan]
 
-    if no_rek in st.session_state.rekening_nasabah:
+    if no_rek in st.session_state.rekening_nasabah and st.session_state.rekening_nasabah[no_rek].get("status", "Aktif") == "Aktif":
         nasabah = st.session_state.rekening_nasabah[no_rek]
         st.markdown(
             f"""<div class='nasabah'><div class='nm'>👤 {nasabah['nama']}</div>
             <div class='sl'>Saldo saat ini: <b>{rupiah(nasabah['saldo'])}</b></div></div>""",
             unsafe_allow_html=True,
         )
-        tab_setor, tab_tarik = st.tabs(["⬇️ Setor tunai", "⬆️ Tarik tunai"])
+        tab_setor, tab_tarik, tab_transfer = st.tabs(["⬇️ Setor tunai", "⬆️ Tarik tunai", "🔁 Transfer"])
 
         with tab_setor:
             jumlah_setor = st.number_input("Jumlah setoran (Rp)", min_value=10_000, step=50_000, key="setor")
@@ -402,15 +411,33 @@ elif halaman == "Teller":
                     nasabah["saldo"] -= jumlah_tarik
                     catat_jurnal([("201", jumlah_tarik, 0), ("101", 0, jumlah_tarik)], "Tarik tunai", no_rek)
                     st.success(f"Penarikan {rupiah(jumlah_tarik)} berhasil. Jurnal otomatis sudah tercatat.")
+
+        with tab_transfer:
+            tujuan = st.text_input("Nomor rekening tujuan", key="tujuan")
+            jumlah_tf = st.number_input("Jumlah transfer (Rp)", min_value=10_000, step=50_000, key="tf")
+            if st.button("Proses transfer"):
+                semua = st.session_state.rekening_nasabah
+                if tujuan == no_rek:
+                    st.error("Rekening tujuan tidak boleh sama dengan rekening asal.")
+                elif tujuan not in semua or semua[tujuan].get("status", "Aktif") != "Aktif":
+                    st.error("Rekening tujuan tidak ditemukan atau sudah ditutup.")
+                elif jumlah_tf > nasabah["saldo"]:
+                    st.error(f"Saldo tidak cukup. Maksimal transfer {rupiah(nasabah['saldo'])}.")
+                else:
+                    nasabah["saldo"] -= jumlah_tf
+                    semua[tujuan]["saldo"] += jumlah_tf
+                    catat_jurnal([("201", jumlah_tf, 0, no_rek), ("201", 0, jumlah_tf, tujuan)],
+                                 f"Transfer dari {no_rek} ke {tujuan}")
+                    st.success(f"Transfer {rupiah(jumlah_tf)} ke {semua[tujuan]['nama']} berhasil. Jurnal otomatis sudah tercatat.")
     else:
-        st.error("Nomor rekening tidak ditemukan. Periksa kembali nomornya atau buka rekening baru di Customer Service.")
+        st.error("Nomor rekening tidak ditemukan atau sudah ditutup. Periksa kembali nomornya atau buka rekening baru di Customer Service.")
 
 # =====================================================
 # CUSTOMER SERVICE
 # =====================================================
 elif halaman == "Customer Service":
     banner("MEJA CUSTOMER SERVICE", "Layanan Nasabah", "Buka rekening baru dan kreditkan bunga tabungan bulanan.")
-    tab_buka, tab_bunga = st.tabs(["🆕 Buka rekening", "💹 Bunga tabungan"])
+    tab_buka, tab_kelola, tab_bunga = st.tabs(["🆕 Buka rekening", "🛠️ Kelola nasabah", "💹 Bunga tabungan"])
 
     with tab_buka:
         col_a, col_b = st.columns([3, 2])
@@ -418,20 +445,29 @@ elif halaman == "Customer Service":
             st.caption(f"Biaya administrasi pembukaan rekening {rupiah(BIAYA_ADMIN)} dipotong dari setoran awal.")
             with st.form("form_rekening", clear_on_submit=True):
                 nama_baru = st.text_input("Nama lengkap nasabah")
-                no_baru = st.text_input("Nomor rekening (6 digit)", max_chars=6)
+                no_ktp = st.text_input("Nomor KTP (16 digit)", max_chars=16)
+                no_hp = st.text_input("Nomor HP", max_chars=15)
+                alamat = st.text_input("Alamat")
+                no_otomatis = str(max([int(n) for n in st.session_state.rekening_nasabah if str(n).isdigit()] or [123455]) + 1)
+                no_baru = st.text_input("Nomor rekening (6 digit)", value=no_otomatis, max_chars=6, disabled=True)
                 setoran_awal = st.number_input("Setoran awal (Rp)", min_value=50_000, step=50_000)
                 kirim = st.form_submit_button("Buka rekening")
 
             if kirim:
                 if not nama_baru.strip():
                     st.error("Nama nasabah wajib diisi.")
+                elif not (no_ktp.isdigit() and len(no_ktp) == 16):
+                    st.error("Nomor KTP harus tepat 16 digit angka.")
+                elif not (no_hp.isdigit() and 10 <= len(no_hp) <= 15):
+                    st.error("Nomor HP harus berupa angka, 10 sampai 15 digit.")
                 elif not (no_baru.isdigit() and len(no_baru) == 6):
                     st.error("Nomor rekening harus tepat 6 digit angka.")
                 elif no_baru in st.session_state.rekening_nasabah:
                     st.error("Nomor rekening sudah dipakai. Gunakan nomor lain.")
                 else:
                     st.session_state.rekening_nasabah[no_baru] = {
-                        "nama": nama_baru.strip(), "saldo": setoran_awal - BIAYA_ADMIN}
+                        "nama": nama_baru.strip(), "saldo": setoran_awal - BIAYA_ADMIN,
+                        "hp": no_hp, "alamat": alamat.strip() or "-", "ktp": no_ktp, "status": "Aktif"}
                     catat_jurnal([("101", setoran_awal, 0), ("201", 0, setoran_awal)],
                                  "Setoran awal pembukaan rekening", no_baru)
                     catat_jurnal([("201", BIAYA_ADMIN, 0), ("401", 0, BIAYA_ADMIN)],
@@ -440,8 +476,46 @@ elif halaman == "Customer Service":
                                f"Saldo awal {rupiah(setoran_awal - BIAYA_ADMIN)} setelah biaya administrasi.")
                     st.balloons()
         with col_b:
-            st.markdown(kartu("Total rekening aktif", f"{len(st.session_state.rekening_nasabah)}", "👥", TEAL),
+            st.markdown(kartu("Total rekening aktif", f"{sum(1 for v in st.session_state.rekening_nasabah.values() if v.get('status', 'Aktif') == 'Aktif')}", "👥", TEAL),
                         unsafe_allow_html=True)
+
+    with tab_kelola:
+        semua = st.session_state.rekening_nasabah
+        opsi = {f"{k} - {v['nama']} ({v.get('status', 'Aktif')})": k for k, v in semua.items()}
+        no_k = opsi[st.selectbox("Pilih nasabah", list(opsi.keys()), key="kelola")]
+        n = semua[no_k]
+        if n.get("status", "Aktif") != "Aktif":
+            st.info("Rekening ini sudah ditutup. Riwayatnya masih bisa dilihat di menu Mutasi Rekening.")
+        else:
+            with st.form("form_ubah"):
+                nm = st.text_input("Nama lengkap", value=n["nama"])
+                hp = st.text_input("Nomor HP", value=n.get("hp", ""), max_chars=15)
+                almt = st.text_input("Alamat", value=n.get("alamat", ""))
+                simpan = st.form_submit_button("Simpan perubahan")
+            if simpan:
+                if not nm.strip():
+                    st.error("Nama nasabah wajib diisi.")
+                elif not (hp.isdigit() and 10 <= len(hp) <= 15):
+                    st.error("Nomor HP harus berupa angka, 10 sampai 15 digit.")
+                else:
+                    n.update({"nama": nm.strip(), "hp": hp, "alamat": almt.strip() or "-"})
+                    st.success("Data nasabah berhasil diperbarui.")
+
+            pemisah("Tutup rekening", MAGENTA)
+            st.caption(f"Saldo {rupiah(n['saldo'])} akan dibayarkan tunai ke nasabah saat rekening ditutup.")
+            yakin = st.checkbox("Saya yakin ingin menutup rekening ini", key=f"yakin_{no_k}")
+            if st.button("Tutup rekening"):
+                if not yakin:
+                    st.warning("Centang kotak konfirmasi terlebih dahulu.")
+                elif n["saldo"] > saldo_akun("101"):
+                    st.error("Kas teller tidak cukup untuk membayar saldo nasabah.")
+                else:
+                    if n["saldo"] > 0:
+                        catat_jurnal([("201", n["saldo"], 0), ("101", 0, n["saldo"])],
+                                     "Penutupan rekening, saldo dibayarkan tunai", no_k)
+                    n["saldo"] = 0
+                    n["status"] = "Ditutup"
+                    st.success(f"Rekening {no_k} berhasil ditutup.")
 
     with tab_bunga:
         rate = st.number_input("Suku bunga tabungan per tahun (%)", min_value=0.0, max_value=20.0, value=3.0, step=0.5)
